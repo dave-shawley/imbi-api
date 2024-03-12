@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import asyncio
+import collections
 import re
 
 from imbi import errors, models
@@ -170,6 +173,11 @@ class CollectionRequestHandler(project.RequestHandlerMixin,
         await self.index_document(result['id'])
 
 
+# these are used for internal methods in RecordRequestHandler
+EnumOptionMapping = dict[str, float]
+RangeOptionMapping = dict[range, float]
+
+
 class RecordRequestHandler(project.RequestHandlerMixin, _RequestHandlerMixin,
                            base.CRUDRequestHandler):
     NAME = 'project'
@@ -228,6 +236,7 @@ class RecordRequestHandler(project.RequestHandlerMixin, _RequestHandlerMixin,
                a.data_type,
                a.fact_type,
                a.ui_options,
+               a.weight,
                CASE WHEN b.value IS NULL THEN 0
                     ELSE CASE WHEN a.fact_type = 'enum' THEN (
                                           SELECT score::NUMERIC(9,2)
@@ -315,6 +324,9 @@ class RecordRequestHandler(project.RequestHandlerMixin, _RequestHandlerMixin,
             if not project.row_count or not project.row:
                 raise errors.ItemNotFound()
 
+            if self.get_query_argument('score-detail', 'false') == 'true':
+                await self._build_score_detail(facts.rows)
+
             output = project.row
             output.update({
                 'facts': facts.rows,
@@ -329,6 +341,109 @@ class RecordRequestHandler(project.RequestHandlerMixin, _RequestHandlerMixin,
     async def patch(self, *args, **kwargs):
         await super().patch(*args, **kwargs)
         await self.index_document(kwargs['id'])
+
+    async def _build_score_detail(self, facts: list[dict]) -> None:
+        """Augment each fact with calculation details and a list of options
+
+        A ``detail`` key containing the following properties is added to
+        each fact:
+
+        * ``options`` is a sorted list of display label, score, and a
+          flag that marks the selected option
+        * ``score`` is the re-calculated score value
+        * ``contribution`` is the portion of the weighted score that
+          the fact is responsible for
+
+        The "re-calculated score" is in there as a sanity check.
+
+        """
+        enum_by_id, range_by_id = await self._retrieve_fact_options(facts)
+        full_weight = sum(f['weight'] or 0 for f in facts)
+        for fact in facts:
+            try:
+                if fact['data_type'] == 'boolean':
+                    value = fact['value'].lower() == 'true'
+                elif fact['data_type'] == 'decimal':
+                    value = float(fact['value'] or '0.0')
+                elif fact['data_type'] == 'integer':
+                    value = int(fact['value'] or '0', 10)
+                else:
+                    value = fact['value']
+            except Exception:
+                self.logger.error('failed to convert %r', fact)
+                raise
+
+            score: float | None = None
+            contribution: float | None = None
+            selected_option: str = fact['value']
+            options: dict[str, float] = {}
+
+            if fact['data_type'] == 'boolean':
+                selected_option = 'true' if value else 'false'
+                options.update({'true': 100.0, 'false': 0.0})
+            elif fact['fact_type'] == 'enum':
+                options.update(enum_by_id[fact['fact_type_id']])
+            elif fact['fact_type'] == 'range':
+                for r, score in range_by_id[fact['fact_type_id']].items():
+                    label = f'[{r.start}, {r.stop})'
+                    options[label] = score
+                    if value in r:
+                        selected_option = label
+
+            if fact['weight']:
+                score = options.get(selected_option, float(fact['score']))
+                weighted_value = float(score) * fact['weight']
+                contribution = weighted_value / full_weight
+
+            fact['detail'] = {
+                'contribution': contribution,
+                'score': score,
+                'options': [{
+                    'label': option,
+                    'value': score,
+                    'selected': option == selected_option
+                } for option, score in sorted(options.items(),
+                                              key=lambda t: (t[1], t[0]))]
+            }
+
+    async def _retrieve_fact_options(
+        self, facts: list[dict]
+    ) -> tuple[dict[int, EnumOptionMapping], dict[int, RangeOptionMapping]]:
+        """Retrieve enum and range options for fact types in fact values
+
+        Both mappings map from the fact type ID to the set of available
+        options. For enums, the option map is from enumerated value to
+        score. For ranges, the option map uses a range object as the
+        key and the corresponding score as the value.
+
+        Returns the enum and range mappings as a tuple.
+
+        """
+        enum_by_id = collections.defaultdict(dict)
+        range_by_id = collections.defaultdict(dict)
+
+        ids = {pf['fact_type_id'] for pf in facts if pf['fact_type'] == 'enum'}
+        if ids:
+            result = await self.postgres_execute(
+                'SELECT e.fact_type_id, e.value, e.score'
+                '  FROM v1.project_fact_type_enums AS e'
+                ' WHERE e.fact_type_id IN %(ids)s', {'ids': tuple(ids)})
+            for row in result:
+                enum_by_id[row['fact_type_id']][row['value']] = row['score']
+        ids = {
+            pf['fact_type_id']
+            for pf in facts if pf['fact_type'] == 'range'
+        }
+        if ids:
+            result = await self.postgres_execute(
+                'SELECT r.fact_type_id, r.min_value, r.max_value, r.score'
+                '  FROM v1.project_fact_type_ranges AS r'
+                ' WHERE r.fact_type_id IN %(ids)s', {'ids': tuple(ids)})
+            for row in result:
+                r = range(int(row['min_value']), int(row['max_value']))
+                range_by_id[row['fact_type_id']][r] = row['score']
+
+        return enum_by_id, range_by_id
 
 
 class SearchRequestHandler(project.RequestHandlerMixin,
