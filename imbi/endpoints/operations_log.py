@@ -25,7 +25,7 @@ class _RequestHandlerMixin:
                o.project_id, o.environment, o.change_type, o.description,
                o.link, o.notes, o.ticket_slug, o.version,
                COALESCE(u.email_address, 'UNKNOWN') AS email_address,
-               COALESCE(u.display_name, 'UNKNOWN') AS display_name,
+               COALESCE(u.display_name, o.recorded_by) AS display_name,
                p.name AS project_name,
                'OperationsLogEntry' AS "type",
                o.occurred_at
@@ -48,7 +48,7 @@ class CollectionRequestHandler(operations_log.RequestHandlerMixin,
                o.link, o.notes, o.ticket_slug, o.version,
                p.name AS project_name,
                COALESCE(u.email_address, 'UNKNOWN') AS email_address,
-               COALESCE(u.display_name, 'UNKNOWN') AS display_name,
+               COALESCE(u.display_name, o.recorded_by) AS display_name,
                'OperationsLogEntry' as "type", o.occurred_at
           FROM v1.operations_log AS o
           LEFT JOIN v1.users AS u ON u.username = o.recorded_by
