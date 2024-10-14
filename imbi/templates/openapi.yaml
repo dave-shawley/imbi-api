@@ -3389,6 +3389,9 @@ paths:
                   type: string
                   format: iso8601-timestamp
                   nullable: true
+                recorded_by:
+                  description: 'Optiional name of the user who recorded the change, defaults to the authenticated user'
+                  type: string
                 project_id:
                   description: The ID of the project that was changed
                   type: number
@@ -3438,8 +3441,6 @@ paths:
               record:
                 summary: An operations log entry example
                 value:
-                  recorded_at: 2021-05-21T18:39:24.197Z
-                  recorded_by: gavinr
                   completed_at: null
                   project_id: 100
                   environment: Testing
@@ -3456,8 +3457,6 @@ paths:
               record:
                 summary: An operations log entry example
                 value:
-                  recorded_at: 2021-05-21T18:39:24.197Z
-                  recorded_by: gavinr
                   completed_at: null
                   project_id: 100
                   environment: Testing

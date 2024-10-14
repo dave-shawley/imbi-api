@@ -172,12 +172,19 @@ class CollectionRequestHandler(operations_log.RequestHandlerMixin,
                 detail='The request did not validate',
                 errors=["'description' is required to be a non-empty string"])
 
+        overrides = {}
+
+        # allow the `recorded_by` field to override the default of using
+        # the username from the authenticated user
+        if request.get('recorded_by'):
+            overrides['username'] = request['recorded_by']
+
         # implement INSERT ... DEFAULT since using `psycopg2.sql.DEFAULT`
         # gets lost somewhere in the stack :/
         now = datetime.datetime.now(datetime.timezone.utc)
-        request['occurred_at'] = request.get('occurred_at') or now
+        overrides['occurred_at'] = request.get('occurred_at') or now
 
-        result = await self._post(kwargs)
+        result = await self._post(kwargs, **overrides)
         await self.index_document(result['id'])
 
 
