@@ -13,7 +13,7 @@ OPS_LOG = {
     'id': {
         'type': 'integer'
     },
-    'recorded_at': {
+    'occurred_at': {
         'type': 'date'
     },
     'recorded_by': {
