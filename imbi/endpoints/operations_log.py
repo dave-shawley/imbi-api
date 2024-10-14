@@ -176,8 +176,15 @@ class CollectionRequestHandler(operations_log.RequestHandlerMixin,
 
         # allow the `recorded_by` field to override the default of using
         # the username from the authenticated user
-        if request.get('recorded_by'):
-            overrides['username'] = request['recorded_by']
+        if username := request.get('recorded_by'):
+            # we don't want to allow overrides for session-based traffic
+            if (self.session.user is not None
+                    and self.session.user.username != username):
+                self.logger.warning(
+                    'ignoring recorded_by override value=%s session.user=%s',
+                    username, self.session.user.username)
+            else:
+                overrides['username'] = request['recorded_by']
 
         # implement INSERT ... DEFAULT since using `psycopg2.sql.DEFAULT`
         # gets lost somewhere in the stack :/
