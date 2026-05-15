@@ -8,10 +8,75 @@ import unittest
 from unittest import mock
 
 import psycopg.errors
+import pydantic
 from fastapi import testclient
 from imbi_common import graph
+from imbi_common.plugins import base as plugin_base
+from imbi_common.plugins import registry as plugin_registry
 
 from imbi_api import app, models
+
+
+async def _stub_action(
+    *,
+    ctx,
+    credentials,
+    external_identifier,
+    action_config,
+    payload,
+) -> None:
+    _ = (ctx, credentials, external_identifier, action_config, payload)
+
+
+class _StubConfig(pydantic.BaseModel):  # pyright: ignore[reportUnusedClass]
+    """Resolved by ImportString from `_StubWebhookPlugin.actions`."""
+
+    key: str = 'default'
+
+
+class _StubWebhookPlugin(plugin_base.WebhookActionPlugin):
+    manifest = plugin_base.PluginManifest(
+        slug='test-plugin',
+        name='Test Plugin',
+        plugin_type='webhook',
+    )
+
+    @classmethod
+    def actions(cls) -> list[plugin_base.ActionDescriptor]:
+        return [
+            plugin_base.ActionDescriptor(
+                name='do_thing',
+                label='Do Thing',
+                callable=typing.cast(
+                    'typing.Any',
+                    'tests.endpoints.test_webhooks:_stub_action',
+                ),
+                config_model=typing.cast(
+                    'typing.Any',
+                    'tests.endpoints.test_webhooks:_StubConfig',
+                ),
+            ),
+        ]
+
+
+def _install_stub_plugin() -> None:
+    registry = plugin_registry._registry  # pyright: ignore[reportPrivateUsage]
+    registry[_StubWebhookPlugin.manifest.slug] = plugin_registry.RegistryEntry(
+        handler_cls=_StubWebhookPlugin,
+        manifest=_StubWebhookPlugin.manifest,
+        package_name='tests',
+        package_version='0.0.0',
+    )
+
+
+def _uninstall_stub_plugin() -> None:
+    registry = plugin_registry._registry  # pyright: ignore[reportPrivateUsage]
+    registry.pop(_StubWebhookPlugin.manifest.slug, None)
+
+
+_VALID_HANDLER = 'test-plugin#do_thing'
+_VALID_CONFIG: dict[str, str] = {'key': 'value'}
+_VALID_CONFIG_JSON = json.dumps(_VALID_CONFIG)
 
 
 class _WebhookDetails(typing.TypedDict):
@@ -47,6 +112,10 @@ class WebhookEndpointsTestCase(unittest.TestCase):
         from imbi_api.auth import permissions
 
         self.test_app = app.create_app()
+        # create_app() calls load_plugins() which wipes the registry;
+        # re-install the test stub after the app is built.
+        _install_stub_plugin()
+        self.addCleanup(_uninstall_stub_plugin)
 
         self.admin_user = models.User(
             email='admin@example.com',
@@ -205,7 +274,7 @@ class WebhookEndpointsTestCase(unittest.TestCase):
         record['rules'] = [
             {
                 'filter_expression': '$.action == "opened"',
-                'handler': 'my.handler',
+                'handler': _VALID_HANDLER,
                 'handler_config': '{"key": "value"}',
             },
         ]
@@ -222,7 +291,7 @@ class WebhookEndpointsTestCase(unittest.TestCase):
             payload['rules'] = [
                 {
                     'filter_expression': '$.action == "opened"',
-                    'handler': 'my.handler',
+                    'handler': _VALID_HANDLER,
                     'handler_config': {'key': 'value'},
                 },
             ]
@@ -234,7 +303,7 @@ class WebhookEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         data = response.json()
         self.assertEqual(len(data['rules']), 1)
-        self.assertEqual(data['rules'][0]['handler'], 'my.handler')
+        self.assertEqual(data['rules'][0]['handler'], _VALID_HANDLER)
 
     def test_create_slug_collision_returns_409(self) -> None:
         self.mock_db.execute.side_effect = psycopg.errors.UniqueViolation()
@@ -1140,7 +1209,7 @@ class WebhookEndpointsTestCase(unittest.TestCase):
                 [
                     {
                         'filter_expression': '$.action == "push"',
-                        'handler': 'my.handler',
+                        'handler': _VALID_HANDLER,
                         'handler_config': '{}',
                     }
                 ]
@@ -1216,7 +1285,7 @@ class WebhookEndpointsTestCase(unittest.TestCase):
         record['rules'] = [
             {
                 'filter_expression': '$.action',
-                'handler': 'my.handler',
+                'handler': _VALID_HANDLER,
                 'handler_config': '{not valid json',
             },
         ]
@@ -1256,7 +1325,7 @@ class WebhookEndpointsTestCase(unittest.TestCase):
         record['rules'] = [
             {
                 'filter_expression': '$.action',
-                'handler': 'my.handler',
+                'handler': _VALID_HANDLER,
                 'handler_config': json.dumps(['step1', 'step2']),
             },
         ]

@@ -842,7 +842,7 @@ class CredentialsTestCase(unittest.TestCase):
         encryptor.decrypt.return_value = json.dumps({'token': 'abc'})
         entry = _make_registry_entry('ssm', required_creds=True)
         with mock.patch(
-            'imbi_api.plugins.credentials.TokenEncryption.get_instance',
+            'imbi_common.plugins.credentials.TokenEncryption.get_instance',
             return_value=encryptor,
         ):
             creds = asyncio.run(get_plugin_credentials(mock_db, 'p1', entry))
@@ -859,7 +859,7 @@ class CredentialsTestCase(unittest.TestCase):
         encryptor.decrypt.return_value = ''
         entry = _make_registry_entry('ssm', required_creds=True)
         with mock.patch(
-            'imbi_api.plugins.credentials.TokenEncryption.get_instance',
+            'imbi_common.plugins.credentials.TokenEncryption.get_instance',
             return_value=encryptor,
         ):
             with self.assertRaises(PluginCredentialsMissing):
@@ -891,7 +891,7 @@ class CredentialsTestCase(unittest.TestCase):
         encryptor.decrypt.return_value = 'plaintext-secret'
         entry = _make_registry_entry('github', auth_type='oauth2')
         with mock.patch(
-            'imbi_api.plugins.credentials.TokenEncryption.get_instance',
+            'imbi_common.plugins.credentials.TokenEncryption.get_instance',
             return_value=encryptor,
         ):
             creds = asyncio.run(get_plugin_credentials(mock_db, 'p1', entry))
@@ -916,7 +916,7 @@ class CredentialsTestCase(unittest.TestCase):
         encryptor.decrypt.side_effect = RuntimeError('boom')
         entry = _make_registry_entry('github', auth_type='oauth2')
         with mock.patch(
-            'imbi_api.plugins.credentials.TokenEncryption.get_instance',
+            'imbi_common.plugins.credentials.TokenEncryption.get_instance',
             return_value=encryptor,
         ):
             with self.assertRaises(PluginCredentialsMissing) as ctx:

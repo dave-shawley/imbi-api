@@ -1,9 +1,91 @@
+import typing
 import unittest
 
 import pydantic
+from imbi_common.plugins import base as plugin_base
+from imbi_common.plugins import registry as plugin_registry
 
 from imbi_api import models
 from imbi_api.domain import models as domain_models
+
+
+async def _model_stub_action(
+    *,
+    ctx,
+    credentials,
+    external_identifier,
+    action_config,
+    payload,
+) -> None:
+    _ = (ctx, credentials, external_identifier, action_config, payload)
+
+
+class _ModelDictConfig(  # pyright: ignore[reportUnusedClass]
+    pydantic.BaseModel
+):
+    """Resolved by ImportString from `_ModelStubPlugin.actions`."""
+
+    branch: str = 'main'
+
+
+class _ModelListConfig(  # pyright: ignore[reportUnusedClass]
+    pydantic.RootModel[list[str]]
+):
+    """Resolved by ImportString from `_ModelStubPlugin.actions`."""
+
+    root: list[str] = pydantic.Field(default_factory=list)
+
+
+class _ModelStubPlugin(plugin_base.WebhookActionPlugin):
+    manifest = plugin_base.PluginManifest(
+        slug='model-stub',
+        name='Model Stub',
+        plugin_type='webhook',
+    )
+
+    @classmethod
+    def actions(cls) -> list[plugin_base.ActionDescriptor]:
+        return [
+            plugin_base.ActionDescriptor(
+                name='dict_action',
+                label='Dict',
+                callable=typing.cast(
+                    'typing.Any',
+                    'tests.test_models:_model_stub_action',
+                ),
+                config_model=typing.cast(
+                    'typing.Any',
+                    'tests.test_models:_ModelDictConfig',
+                ),
+            ),
+            plugin_base.ActionDescriptor(
+                name='list_action',
+                label='List',
+                callable=typing.cast(
+                    'typing.Any',
+                    'tests.test_models:_model_stub_action',
+                ),
+                config_model=typing.cast(
+                    'typing.Any',
+                    'tests.test_models:_ModelListConfig',
+                ),
+            ),
+        ]
+
+
+def _install_model_stub() -> None:
+    registry = plugin_registry._registry  # pyright: ignore[reportPrivateUsage]
+    registry[_ModelStubPlugin.manifest.slug] = plugin_registry.RegistryEntry(
+        handler_cls=_ModelStubPlugin,
+        manifest=_ModelStubPlugin.manifest,
+        package_name='tests',
+        package_version='0.0.0',
+    )
+
+
+def _uninstall_model_stub() -> None:
+    registry = plugin_registry._registry  # pyright: ignore[reportPrivateUsage]
+    registry.pop(_ModelStubPlugin.manifest.slug, None)
 
 
 class BlueprintModelTestCase(unittest.TestCase):
@@ -436,16 +518,20 @@ class WebhookCreateModelTestCase(unittest.TestCase):
         self.assertEqual(obj.identifier_selector, '$.repo.name')
 
     def test_with_rules(self) -> None:
-        obj = domain_models.WebhookCreate.model_validate(
-            self._valid_payload(
-                rules=[
-                    {
-                        'filter_expression': '$.action',
-                        'handler': 'my.handler',
-                    },
-                ],
-            ),
-        )
+        _install_model_stub()
+        try:
+            obj = domain_models.WebhookCreate.model_validate(
+                self._valid_payload(
+                    rules=[
+                        {
+                            'filter_expression': '$.action',
+                            'handler': 'model-stub#dict_action',
+                        },
+                    ],
+                ),
+            )
+        finally:
+            _uninstall_model_stub()
         self.assertEqual(len(obj.rules), 1)
         self.assertEqual(obj.rules[0].handler_config, {})
 
@@ -479,11 +565,15 @@ class WebhookUpdateModelTestCase(unittest.TestCase):
 class WebhookRuleCreateModelTestCase(unittest.TestCase):
     """Test cases for WebhookRuleCreate validation."""
 
+    def setUp(self) -> None:
+        _install_model_stub()
+        self.addCleanup(_uninstall_model_stub)
+
     def test_valid_rule(self) -> None:
         obj = domain_models.WebhookRuleCreate.model_validate(
             {
                 'filter_expression': '$.action == "push"',
-                'handler': 'my.module.handle_push',
+                'handler': 'model-stub#dict_action',
             }
         )
         self.assertEqual(obj.handler_config, {})
@@ -492,7 +582,7 @@ class WebhookRuleCreateModelTestCase(unittest.TestCase):
         obj = domain_models.WebhookRuleCreate.model_validate(
             {
                 'filter_expression': '$.action',
-                'handler': 'my.handler',
+                'handler': 'model-stub#list_action',
                 'handler_config': ['step1', 'step2'],
             }
         )
@@ -503,7 +593,7 @@ class WebhookRuleCreateModelTestCase(unittest.TestCase):
             domain_models.WebhookRuleCreate.model_validate(
                 {
                     'filter_expression': '',
-                    'handler': 'my.handler',
+                    'handler': 'model-stub#dict_action',
                 }
             )
 
@@ -515,6 +605,47 @@ class WebhookRuleCreateModelTestCase(unittest.TestCase):
                     'handler': '',
                 }
             )
+
+    def test_malformed_handler_rejected(self) -> None:
+        with self.assertRaises(pydantic.ValidationError) as ctx:
+            domain_models.WebhookRuleCreate.model_validate(
+                {
+                    'filter_expression': '$.action',
+                    'handler': 'no_separator',
+                }
+            )
+        self.assertIn('<plugin_slug>#<action_name>', str(ctx.exception))
+
+    def test_unknown_plugin_rejected(self) -> None:
+        with self.assertRaises(pydantic.ValidationError) as ctx:
+            domain_models.WebhookRuleCreate.model_validate(
+                {
+                    'filter_expression': '$.action',
+                    'handler': 'no-such-plugin#dict_action',
+                }
+            )
+        self.assertIn('unknown plugin', str(ctx.exception))
+
+    def test_unknown_action_rejected(self) -> None:
+        with self.assertRaises(pydantic.ValidationError) as ctx:
+            domain_models.WebhookRuleCreate.model_validate(
+                {
+                    'filter_expression': '$.action',
+                    'handler': 'model-stub#missing_action',
+                }
+            )
+        self.assertIn('does not expose action', str(ctx.exception))
+
+    def test_handler_config_failing_model_rejected(self) -> None:
+        with self.assertRaises(pydantic.ValidationError) as ctx:
+            domain_models.WebhookRuleCreate.model_validate(
+                {
+                    'filter_expression': '$.action',
+                    'handler': 'model-stub#dict_action',
+                    'handler_config': {'branch': 42},
+                }
+            )
+        self.assertIn('handler_config', str(ctx.exception))
 
 
 class ExistsInModelTestCase(unittest.TestCase):

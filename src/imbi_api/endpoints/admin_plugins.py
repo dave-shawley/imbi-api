@@ -8,6 +8,7 @@ import typing
 import fastapi
 import pydantic
 from imbi_common import graph
+from imbi_common.plugins import base as plugin_base
 from imbi_common.plugins.errors import (
     PluginNotFoundError,
 )
@@ -391,6 +392,49 @@ async def _set_vertex_label_overrides(
             'REMOVE r.vertex_label_overrides'
         )
         await db.execute(query, {'slug': slug}, [])
+
+
+@admin_plugins_router.get('/plugins/{slug}/actions')
+async def list_plugin_actions(
+    slug: str,
+    auth: typing.Annotated[
+        permissions.AuthContext,
+        fastapi.Depends(
+            permissions.require_permission('admin:plugins:read'),
+        ),
+    ],
+) -> list[dict[str, typing.Any]]:
+    """Return the webhook actions a plugin exposes with JSON Schemas.
+
+    The UI uses this endpoint to render the webhook-rule editor: every
+    descriptor's ``config_schema`` is the JSON Schema derived from the
+    action's pydantic configuration model so the UI can drive form
+    rendering without hard-coding per-plugin knowledge. Returns ``404``
+    when the plugin slug is not registered, and ``404`` when the
+    registered plugin is not a ``WebhookActionPlugin``.
+    """
+    _ = auth
+    try:
+        entry = get_plugin(slug)
+    except PluginNotFoundError as exc:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=f'Plugin {slug!r} is not installed',
+        ) from exc
+    if not issubclass(entry.handler_cls, plugin_base.WebhookActionPlugin):
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=f'Plugin {slug!r} does not expose webhook actions',
+        )
+    return [
+        {
+            'name': descriptor.name,
+            'label': descriptor.label,
+            'description': descriptor.description,
+            'config_schema': descriptor.config_model.model_json_schema(),
+        }
+        for descriptor in entry.handler_cls.actions()
+    ]
 
 
 @admin_plugins_router.get('/plugins/{slug}/edges')

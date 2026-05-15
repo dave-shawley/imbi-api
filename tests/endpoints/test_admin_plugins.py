@@ -1,6 +1,7 @@
 """Tests for admin plugin management endpoints."""
 
 import datetime
+import sys
 import unittest
 from unittest import mock
 
@@ -239,3 +240,106 @@ class AdminPluginsEndpointTestCase(unittest.TestCase):
                 )
         self.assertEqual(response.status_code, 404)
         self.assertIn('OTHER', response.json()['detail'])
+
+    def _make_webhook_entry(self) -> object:
+        import typing
+
+        import pydantic
+        from imbi_common.plugins import base as plugin_base
+        from imbi_common.plugins.registry import RegistryEntry
+
+        async def _action(
+            *,
+            ctx,
+            credentials,
+            external_identifier,
+            action_config,
+            payload,
+        ) -> None:
+            _ = (
+                ctx,
+                credentials,
+                external_identifier,
+                action_config,
+                payload,
+            )
+
+        class _ActionConfig(pydantic.BaseModel):
+            note: str = 'hello'
+
+        # Stash on the module so the ImportString resolver can find them.
+        module = sys.modules[__name__]
+        module._action = _action  # type: ignore[attr-defined]
+        module._ActionConfig = _ActionConfig  # type: ignore[attr-defined]
+
+        class _Hook(plugin_base.WebhookActionPlugin):
+            manifest = plugin_base.PluginManifest(
+                slug='hook',
+                name='Hook',
+                plugin_type='webhook',
+            )
+
+            @classmethod
+            def actions(cls) -> list[plugin_base.ActionDescriptor]:
+                return [
+                    plugin_base.ActionDescriptor(
+                        name='do_thing',
+                        label='Do Thing',
+                        description='Demo action',
+                        callable=typing.cast(
+                            'typing.Any',
+                            'tests.endpoints.test_admin_plugins:_action',
+                        ),
+                        config_model=typing.cast(
+                            'typing.Any',
+                            'tests.endpoints.test_admin_plugins:_ActionConfig',
+                        ),
+                    ),
+                ]
+
+        return RegistryEntry(
+            handler_cls=_Hook,
+            manifest=_Hook.manifest,
+            package_name='imbi-plugin-hook',
+            package_version='1.0.0',
+        )
+
+    def test_list_plugin_actions_not_found(self) -> None:
+        from imbi_common.plugins.errors import PluginNotFoundError
+
+        with mock.patch(
+            'imbi_api.endpoints.admin_plugins.get_plugin',
+            side_effect=PluginNotFoundError('no-such-plugin'),
+        ):
+            with testclient.TestClient(self.test_app) as client:
+                response = client.get('/admin/plugins/no-such-plugin/actions')
+        self.assertEqual(response.status_code, 404)
+
+    def test_list_plugin_actions_not_webhook_plugin(self) -> None:
+        entry = self._make_entry()  # a ConfigurationPlugin
+        with mock.patch(
+            'imbi_api.endpoints.admin_plugins.get_plugin',
+            return_value=entry,
+        ):
+            with testclient.TestClient(self.test_app) as client:
+                response = client.get('/admin/plugins/ssm/actions')
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('webhook actions', response.json()['detail'])
+
+    def test_list_plugin_actions_returns_descriptors(self) -> None:
+        entry = self._make_webhook_entry()
+        with mock.patch(
+            'imbi_api.endpoints.admin_plugins.get_plugin',
+            return_value=entry,
+        ):
+            with testclient.TestClient(self.test_app) as client:
+                response = client.get('/admin/plugins/hook/actions')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(1, len(data))
+        descriptor = data[0]
+        self.assertEqual('do_thing', descriptor['name'])
+        self.assertEqual('Do Thing', descriptor['label'])
+        self.assertEqual('Demo action', descriptor['description'])
+        self.assertIn('properties', descriptor['config_schema'])
+        self.assertIn('note', descriptor['config_schema']['properties'])

@@ -8,10 +8,65 @@ needed across all Imbi services.
 
 import datetime
 import json
+import re
 import typing
 
 import pydantic
 from imbi_common import graph, models
+from imbi_common.plugins import base as plugin_base
+from imbi_common.plugins import registry as plugin_registry
+from imbi_common.plugins.errors import PluginNotFoundError
+
+#: ``WebhookRule.handler`` is ``"<plugin_slug>#<action_name>"`` — the
+#: same shape the gateway enforces. Defined here so the API rejects
+#: malformed rules at write time with 422 rather than letting them
+#: reach the gateway and silently no-op.
+_HANDLER_PATTERN = re.compile(r'^[a-z][a-z0-9-]*#[a-z][a-z0-9_]*$')
+
+
+def _validate_rule_handler(
+    handler: str,
+    handler_config: dict[str, typing.Any] | list[typing.Any],
+) -> None:
+    """Resolve a handler string against the plugin registry.
+
+    Raises ``ValueError`` (which pydantic converts to a 422) when the
+    handler is malformed, references an unknown plugin, references an
+    action the plugin does not expose, or carries a ``handler_config``
+    that does not validate against the action's configuration model.
+    """
+    if not _HANDLER_PATTERN.match(handler):
+        raise ValueError(
+            f"handler {handler!r} must be '<plugin_slug>#<action_name>'"
+        )
+    slug, action_name = handler.split('#', 1)
+    try:
+        entry = plugin_registry.get_plugin(slug)
+    except PluginNotFoundError as exc:
+        raise ValueError(
+            f'handler {handler!r} references unknown plugin {slug!r}'
+        ) from exc
+    if not issubclass(entry.handler_cls, plugin_base.WebhookActionPlugin):
+        raise ValueError(
+            f'handler {handler!r} references plugin {slug!r} which is not '
+            'a WebhookActionPlugin'
+        )
+    descriptor = next(
+        (d for d in entry.handler_cls.actions() if d.name == action_name),
+        None,
+    )
+    if descriptor is None:
+        raise ValueError(
+            f'handler {handler!r}: plugin {slug!r} does not expose '
+            f'action {action_name!r}'
+        )
+    try:
+        descriptor.config_model.model_validate(handler_config)
+    except pydantic.ValidationError as exc:
+        raise ValueError(
+            f'handler_config for {handler!r} failed validation: {exc}'
+        ) from exc
+
 
 __all__ = [
     'SECRET_FIELDS',
@@ -958,17 +1013,32 @@ class OAuth2TokenResponse(pydantic.BaseModel):
 
 
 class WebhookRuleCreate(pydantic.BaseModel):
-    """A single rule within a webhook (no ordinal — position is implicit)."""
+    """A single rule within a webhook (no ordinal — position is implicit).
+
+    The ``handler`` field names a webhook-action plugin and one of its
+    declared actions using the ``"<plugin_slug>#<action_name>"`` form.
+    The plugin registry is consulted at write time so that bad slugs,
+    unknown actions, and configs that fail the action's
+    ``config_model`` are rejected with 422 before they can be persisted.
+    """
 
     filter_expression: str = pydantic.Field(min_length=1)
     handler: str = pydantic.Field(
         min_length=1,
-        description='Python callable in dotted import syntax',
+        description=(
+            'Webhook action reference of the form '
+            '"<plugin_slug>#<action_name>".'
+        ),
     )
     handler_config: dict[str, typing.Any] | list[typing.Any] = pydantic.Field(
         default_factory=dict,
         description='Structured configuration passed to the handler',
     )
+
+    @pydantic.model_validator(mode='after')
+    def _validate_handler_and_config(self) -> typing.Self:
+        _validate_rule_handler(self.handler, self.handler_config)
+        return self
 
 
 class WebhookCreate(pydantic.BaseModel):
